@@ -7,37 +7,55 @@ import os
 
 # ─── CONSTANTS ──────────────────────────────────────────────────────────────
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tracker.db")
+# Determine database path - works for both .py and .exe
+if getattr(sys, 'frozen', False):
+    # Running as compiled .exe
+    DB_PATH = os.path.join(os.path.dirname(sys.executable), "tracker.db")
+else:
+    # Running as Python script
+    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tracker.db")
+
 MOOD_EMOJIS = {1: "😩", 2: "😢", 3: "😟", 4: "😕", 5: "😐", 6: "🙂", 7: "😊", 8: "😄", 9: "🤩", 10: "🔥"}
 
 # ─── DATABASE ────────────────────────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        # Enable foreign keys and set timeout for locked database
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        return conn
+    except sqlite3.OperationalError as e:
+        print(f"Database error: {e}")
+        print(f"Database path: {DB_PATH}")
+        raise
 
 
 def init_db():
-    conn = get_db()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS daily_log (
-            date TEXT PRIMARY KEY,
-            sleep_hours REAL,
-            sleep_disturbances INTEGER,
-            calories INTEGER,
-            mood INTEGER,
-            discomfort_level INTEGER,
-            discomfort_notes TEXT,
-            gym_notes TEXT
-        );
-        CREATE TABLE IF NOT EXISTS weekly_weight (
-            date TEXT PRIMARY KEY,
-            weight_kg REAL
-        );
-    """)
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db()
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS daily_log (
+                date TEXT PRIMARY KEY,
+                sleep_hours REAL,
+                sleep_disturbances INTEGER,
+                calories INTEGER,
+                mood INTEGER,
+                discomfort_level INTEGER,
+                discomfort_notes TEXT,
+                gym_notes TEXT
+            );
+            CREATE TABLE IF NOT EXISTS weekly_weight (
+                date TEXT PRIMARY KEY,
+                weight_kg REAL
+            );
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Database initialization error: {e}")
 
 
 # ─── MAIN APP ────────────────────────────────────────────────────────────────
@@ -240,63 +258,72 @@ class TrackerApp(ctk.CTk):
 
     def _save_entry(self):
         date_str = self.selected_date.isoformat()
-        conn = get_db()
+        try:
+            conn = get_db()
 
-        daily_data = (
-            date_str,
-            self._safe_float(self.sleep_hours.get()),
-            self._safe_int(self.sleep_disturbances.get()),
-            self._safe_int(self.calories.get()),
-            int(float(self.mood_slider.get())),
-            int(float(self.disc_slider.get())),
-            self.disc_notes.get("1.0", "end").strip(),
-            self.gym_notes.get("1.0", "end").strip()
-        )
+            daily_data = (
+                date_str,
+                self._safe_float(self.sleep_hours.get()),
+                self._safe_int(self.sleep_disturbances.get()),
+                self._safe_int(self.calories.get()),
+                int(float(self.mood_slider.get())),
+                int(float(self.disc_slider.get())),
+                self.disc_notes.get("1.0", "end").strip(),
+                self.gym_notes.get("1.0", "end").strip()
+            )
 
-        conn.execute("""
-            INSERT OR REPLACE INTO daily_log
-            (date, sleep_hours, sleep_disturbances, calories, mood, discomfort_level, discomfort_notes, gym_notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, daily_data)
+            conn.execute("""
+                INSERT OR REPLACE INTO daily_log
+                (date, sleep_hours, sleep_disturbances, calories, mood, discomfort_level, discomfort_notes, gym_notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, daily_data)
 
-        weight = self._safe_float(self.weight_entry.get())
-        if weight:
-            conn.execute("INSERT OR REPLACE INTO weekly_weight (date, weight_kg) VALUES (?, ?)", (date_str, weight))
+            weight = self._safe_float(self.weight_entry.get())
+            if weight:
+                conn.execute("INSERT OR REPLACE INTO weekly_weight (date, weight_kg) VALUES (?, ?)", (date_str, weight))
 
-        conn.commit()
-        conn.close()
+            conn.commit()
+            conn.close()
 
-        self._update_sleep_quality()
-        self._show_status(f"✅ Saved entry for {self.selected_date.strftime('%b %d')}!", "#2d8f4e")
+            self._update_sleep_quality()
+            self._show_status(f"✅ Saved entry for {self.selected_date.strftime('%b %d')}! (Database: {DB_PATH})", "#2d8f4e")
+        except Exception as e:
+            self._show_status(f"❌ Save failed: {str(e)}", "#c94040")
+            print(f"Error saving entry: {e}")
+            print(f"Database path: {DB_PATH}")
 
     def _load_entry(self):
         self._clear_fields()
         date_str = self.selected_date.isoformat()
-        conn = get_db()
+        try:
+            conn = get_db()
 
-        row = conn.execute("SELECT * FROM daily_log WHERE date = ?", (date_str,)).fetchone()
-        if row:
-            self._populate_field(self.sleep_hours, row["sleep_hours"])
-            self._populate_field(self.sleep_disturbances, row["sleep_disturbances"])
-            self._populate_field(self.calories, row["calories"])
-            
-            if row["mood"] is not None:
-                self.mood_slider.set(row["mood"])
-                self._update_mood_label(row["mood"])
-            
-            if row["discomfort_level"] is not None:
-                self.disc_slider.set(row["discomfort_level"])
-                self._update_disc_label(row["discomfort_level"])
-            
-            self._populate_textbox(self.disc_notes, row["discomfort_notes"])
-            self._populate_textbox(self.gym_notes, row["gym_notes"])
-            self._update_sleep_quality()
+            row = conn.execute("SELECT * FROM daily_log WHERE date = ?", (date_str,)).fetchone()
+            if row:
+                self._populate_field(self.sleep_hours, row["sleep_hours"])
+                self._populate_field(self.sleep_disturbances, row["sleep_disturbances"])
+                self._populate_field(self.calories, row["calories"])
+                
+                if row["mood"] is not None:
+                    self.mood_slider.set(row["mood"])
+                    self._update_mood_label(row["mood"])
+                
+                if row["discomfort_level"] is not None:
+                    self.disc_slider.set(row["discomfort_level"])
+                    self._update_disc_label(row["discomfort_level"])
+                
+                self._populate_textbox(self.disc_notes, row["discomfort_notes"])
+                self._populate_textbox(self.gym_notes, row["gym_notes"])
+                self._update_sleep_quality()
 
-        weight_row = conn.execute("SELECT * FROM weekly_weight WHERE date = ?", (date_str,)).fetchone()
-        if weight_row:
-            self.weight_entry.insert(0, str(weight_row["weight_kg"]))
+            weight_row = conn.execute("SELECT * FROM weekly_weight WHERE date = ?", (date_str,)).fetchone()
+            if weight_row:
+                self.weight_entry.insert(0, str(weight_row["weight_kg"]))
 
-        conn.close()
+            conn.close()
+        except Exception as e:
+            print(f"Error loading entry: {e}")
+            print(f"Database path: {DB_PATH}")
 
     def _update_sleep_quality(self):
         hours = self._safe_float(self.sleep_hours.get())
@@ -320,26 +347,30 @@ class TrackerApp(ctk.CTk):
         win.geometry("1100x700")
         win.grab_set()
 
-        conn = get_db()
-        rows = conn.execute("""
-            SELECT d.*, w.weight_kg
-            FROM daily_log d
-            LEFT JOIN weekly_weight w ON d.date = w.date
-            ORDER BY d.date DESC
-            LIMIT 14
-        """).fetchall()
-        conn.close()
+        try:
+            conn = get_db()
+            rows = conn.execute("""
+                SELECT d.*, w.weight_kg
+                FROM daily_log d
+                LEFT JOIN weekly_weight w ON d.date = w.date
+                ORDER BY d.date DESC
+                LIMIT 14
+            """).fetchall()
+            conn.close()
 
-        if not rows:
-            ctk.CTkLabel(win, text="No entries yet! Start logging today.",
-                         font=("Arial", 16)).pack(expand=True)
-            return
+            if not rows:
+                ctk.CTkLabel(win, text="No entries yet! Start logging today.",
+                             font=("Arial", 16)).pack(expand=True)
+                return
 
-        scroll = ctk.CTkScrollableFrame(win)
-        scroll.pack(fill="both", expand=True, padx=10, pady=10)
+            scroll = ctk.CTkScrollableFrame(win)
+            scroll.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self._add_summary(scroll, rows)
-        self._add_charts(scroll, rows)
+            self._add_summary(scroll, rows)
+            self._add_charts(scroll, rows)
+        except Exception as e:
+            ctk.CTkLabel(win, text=f"Error loading history: {str(e)}\n\nDatabase path: {DB_PATH}",
+                         font=("Arial", 12)).pack(expand=True, padx=20, pady=20)
 
     def _add_summary(self, parent, rows):
         summary = ctk.CTkFrame(parent)
@@ -376,7 +407,7 @@ class TrackerApp(ctk.CTk):
         ctk.CTkLabel(summary, text="  |  ".join(stats) if stats else "Not enough data yet.",
                      font=("Arial", 12)).pack(anchor="w", padx=10, pady=(0, 10))
 
-def _add_charts(self, parent, rows):
+    def _add_charts(self, parent, rows):
         rows_asc = list(reversed(rows))
         
         # Sleep Chart
@@ -391,88 +422,88 @@ def _add_charts(self, parent, rows):
         # Calories Chart
         self._create_chart(parent, "🍽️ Calories", rows_asc, "calories", "#f59e0b", max_val=3000)
 
-   def _create_chart(self, parent, title, rows, field, color, max_val):
-    frame = ctk.CTkFrame(parent)
-    frame.pack(fill="x", pady=(0, 15))
-    
-    ctk.CTkLabel(frame, text=title, font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 5))
-    
-    chart_frame = ctk.CTkFrame(frame, height=120)
-    chart_frame.pack(fill="x", padx=10, pady=(0, 10))
-    chart_frame.pack_propagate(False)
+    def _create_chart(self, parent, title, rows, field, color, max_val):
+        frame = ctk.CTkFrame(parent)
+        frame.pack(fill="x", pady=(0, 15))
+        
+        ctk.CTkLabel(frame, text=title, font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 5))
+        
+        chart_frame = ctk.CTkFrame(frame, height=120)
+        chart_frame.pack(fill="x", padx=10, pady=(0, 10))
+        chart_frame.pack_propagate(False)
 
-    BAR_MAX_HEIGHT = 80
+        BAR_MAX_HEIGHT = 80
 
-    for row in rows:
-        val = row[field]
+        for row in rows:
+            val = row[field]
 
-        # Container per day (DO NOT use fill="both")
-        bar_container = ctk.CTkFrame(chart_frame, fg_color="transparent")
-        bar_container.pack(side="left", expand=True, padx=2)
+            # Container per day (DO NOT use fill="both")
+            bar_container = ctk.CTkFrame(chart_frame, fg_color="transparent")
+            bar_container.pack(side="left", expand=True, padx=2)
 
-        # ─── HANDLE NONE VALUES (Placeholder Column) ───
-        if val is None:
+            # ─── HANDLE NONE VALUES (Placeholder Column) ───
+            if val is None:
+                ctk.CTkFrame(
+                    bar_container,
+                    width=30,
+                    height=BAR_MAX_HEIGHT,
+                    fg_color="transparent"
+                ).pack()
+
+                date_str = datetime.fromisoformat(row["date"]).strftime("%m/%d")
+                ctk.CTkLabel(
+                    bar_container,
+                    text="–",
+                    font=("Arial", 9),
+                    text_color="gray"
+                ).pack(pady=(2, 0))
+
+                ctk.CTkLabel(
+                    bar_container,
+                    text=date_str,
+                    font=("Arial", 8),
+                    text_color="gray"
+                ).pack()
+
+                continue
+
+            # ─── NORMAL BAR CALCULATION ───
+            bar_height = int((val / max_val) * BAR_MAX_HEIGHT) if max_val > 0 else 0
+            bar_height = max(2, min(bar_height, BAR_MAX_HEIGHT))  # Clamp AFTER calculation
+            spacer_height = BAR_MAX_HEIGHT - bar_height  # Derived from clamped value
+
+            # Spacer (top empty part)
             ctk.CTkFrame(
                 bar_container,
                 width=30,
-                height=BAR_MAX_HEIGHT,
+                height=spacer_height,
                 fg_color="transparent"
             ).pack()
 
-            date_str = datetime.fromisoformat(row["date"]).strftime("%m/%d")
+            # Actual bar
+            ctk.CTkFrame(
+                bar_container,
+                width=30,
+                height=bar_height,
+                fg_color=color,
+                corner_radius=3
+            ).pack()
+
+            # Value label
             ctk.CTkLabel(
                 bar_container,
-                text="–",
-                font=("Arial", 9),
-                text_color="gray"
+                text=str(int(val) if isinstance(val, (int, float)) else val),
+                font=("Arial", 9, "bold")
             ).pack(pady=(2, 0))
 
+            # Date label
+            date_str = datetime.fromisoformat(row["date"]).strftime("%m/%d")
             ctk.CTkLabel(
                 bar_container,
                 text=date_str,
                 font=("Arial", 8),
                 text_color="gray"
             ).pack()
-
-            continue
-
-        # ─── NORMAL BAR CALCULATION ───
-        bar_height = int((val / max_val) * BAR_MAX_HEIGHT) if max_val > 0 else 0
-        bar_height = max(2, min(bar_height, BAR_MAX_HEIGHT))  # Clamp AFTER calculation
-        spacer_height = BAR_MAX_HEIGHT - bar_height  # Derived from clamped value
-
-        # Spacer (top empty part)
-        ctk.CTkFrame(
-            bar_container,
-            width=30,
-            height=spacer_height,
-            fg_color="transparent"
-        ).pack()
-
-        # Actual bar
-        ctk.CTkFrame(
-            bar_container,
-            width=30,
-            height=bar_height,
-            fg_color=color,
-            corner_radius=3
-        ).pack()
-
-        # Value label
-        ctk.CTkLabel(
-            bar_container,
-            text=str(int(val) if isinstance(val, (int, float)) else val),
-            font=("Arial", 9, "bold")
-        ).pack(pady=(2, 0))
-
-        # Date label
-        date_str = datetime.fromisoformat(row["date"]).strftime("%m/%d")
-        ctk.CTkLabel(
-            bar_container,
-            text=date_str,
-            font=("Arial", 8),
-            text_color="gray"
-        ).pack()
 
     # ── UTILITIES ────────────────────────────────────────────────────────
 
